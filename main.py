@@ -78,7 +78,7 @@ model = "gemini-2.0-flash-001"
 system_prompt = """
 You are a helpful AI coding agent.
 
-When a user asks a question or makes a request, make a function call plan. You can perform the following operations:
+When a user asks a question or makes a request, you can perform the following operations using function calls:
 
 - List files and directories
 - Read file contents
@@ -86,6 +86,8 @@ When a user asks a question or makes a request, make a function call plan. You c
 - Write or overwrite files
 
 All paths you provide should be relative to the working directory. You do not need to specify the working directory in your function calls as it is automatically injected for security reasons.
+
+Work step by step to complete the user's request. When you have gathered enough information or completed the task, provide a final text response explaining what you found or accomplished. Do not make unnecessary function calls once you have completed the task.
 """
 
 schema_get_files_info = types.FunctionDeclaration(
@@ -170,27 +172,56 @@ config = types.GenerateContentConfig(
 
 client = genai.Client(api_key=api_key)
 
-response = client.models.generate_content(model=model, contents=messages, config=config)
-metadata = response.usage_metadata
-
 if verbose:
     print(f"User prompt: {user_prompt}")
-    metadata = response.usage_metadata
-    print(f"Prompt tokens: {metadata.prompt_token_count}")
-    print(f"Response tokens: {metadata.candidates_token_count}")
 
-if response.candidates and response.candidates[0].content.parts:
-    for part in response.candidates[0].content.parts:
-        if hasattr(part, 'function_call') and part.function_call:
-            function_call_part = part.function_call
-            function_call_result = call_function(function_call_part, verbose)
+max_iterations = 20
+for iteration in range(max_iterations):
+    if verbose:
+        print(f"\n--- Iteration {iteration + 1} ---")
 
-            if not (function_call_result.parts and
-                    hasattr(function_call_result.parts[0], 'function_response') and
-                    function_call_result.parts[0].function_response):
-                raise Exception("Invalid function response format")
+    response = client.models.generate_content(model=model, contents=messages, config=config)
 
-            if verbose:
-                print(f"-> {function_call_result.parts[0].function_response.response}")
-        elif hasattr(part, 'text') and part.text:
-            print(part.text)
+    if verbose:
+        metadata = response.usage_metadata
+        print(f"Prompt tokens: {metadata.prompt_token_count}")
+        print(f"Response tokens: {metadata.candidates_token_count}")
+
+    if not response.candidates:
+        print("No candidates in response, breaking...")
+        break
+
+    candidate_content = response.candidates[0].content
+    messages.append(candidate_content)
+
+    function_called = False
+
+    if candidate_content.parts:
+        for part in candidate_content.parts:
+            if hasattr(part, 'function_call') and part.function_call:
+                function_call_part = part.function_call
+                function_call_result = call_function(function_call_part, verbose)
+
+                if not (function_call_result.parts and
+                        hasattr(function_call_result.parts[0], 'function_response') and
+                        function_call_result.parts[0].function_response):
+                    raise Exception("Invalid function response format")
+
+                messages.append(function_call_result)
+                function_called = True
+
+                if verbose:
+                    print(f"-> {function_call_result.parts[0].function_response.response}")
+
+    if not function_called:
+        for part in candidate_content.parts:
+            if hasattr(part, 'text') and part.text:
+                print("Final response:")
+                print(part.text)
+                exit()
+
+        print("No function calls or text made, agent finished.")
+        break
+
+if iteration == max_iterations - 1:
+    print(f"Reached maximum iterations ({max_iterations}), stopping agent.")
